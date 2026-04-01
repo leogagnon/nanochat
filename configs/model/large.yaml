@@ -1,0 +1,7 @@
+# @package model
+# d36: large model
+depth: 36
+aspect_ratio: 64
+head_dim: 128
+max_seq_len: 2048
+window_pattern: SSSL

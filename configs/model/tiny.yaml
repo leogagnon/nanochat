@@ -1,0 +1,7 @@
+# @package model
+# CPU/debug: very small model
+depth: 4
+aspect_ratio: 64
+head_dim: 128
+max_seq_len: 512
+window_pattern: L  # full attention (SDPA doesn't support sliding window)

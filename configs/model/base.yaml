@@ -1,0 +1,7 @@
+# @package model
+# d20: default production model
+depth: 20
+aspect_ratio: 64
+head_dim: 128
+max_seq_len: 2048
+window_pattern: SSSL
