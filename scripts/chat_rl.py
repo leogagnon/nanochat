@@ -32,6 +32,8 @@ from tasks.gsm8k import GSM8K
 parser = argparse.ArgumentParser(description="Reinforcement learning on GSM8K")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--wandb-project", type=str, default="nanochat-rl", help="wandb project name")
+parser.add_argument("--wandb-entity", type=str, default=None, help="wandb entity/team name")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model loading
@@ -68,7 +70,13 @@ master_process = ddp_rank == 0 # this process will do logging, checkpointing etc
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=args.run, config=user_config)
+run_name = None if args.run == "" else args.run
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
+    project=args.wandb_project,
+    entity=args.wandb_entity,
+    name=run_name,
+    config=user_config
+)
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag=args.model_tag, step=args.model_step)

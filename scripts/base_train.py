@@ -41,6 +41,8 @@ print_banner()
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--wandb-project", type=str, default="nanochat", help="wandb project name")
+parser.add_argument("--wandb-entity", type=str, default=None, help="wandb entity/team name")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
@@ -55,6 +57,7 @@ parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding 
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
+parser.add_argument("--target-tokens", type=int, default=-1, help="calculate num_iterations from total training tokens (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
@@ -97,7 +100,13 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
+run_name = None if args.run == "" else args.run
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
+    project=args.wandb_project,
+    entity=args.wandb_entity,
+    name=run_name,
+    config=user_config
+)
 
 # Flash Attention status
 from nanochat.flash_attention import USE_FA3
@@ -335,8 +344,8 @@ x, y, dataloader_state_dict = next(train_loader) # kick off load of the very fir
 # -----------------------------------------------------------------------------
 # Calculate the number of iterations we will train for and set up the various schedulers
 
-# num_iterations: either it is given, or from target flops, or from target data:param ratio (in that order)
-assert args.num_iterations > 0 or args.target_param_data_ratio > 0 or args.target_flops > 0
+# num_iterations: either it is given, or from target flops, or from target tokens, or from target data:param ratio (in that order)
+assert args.num_iterations > 0 or args.target_tokens > 0 or args.target_param_data_ratio > 0 or args.target_flops > 0
 if args.num_iterations > 0:
     # Override num_iterations to a specific value if given
     num_iterations = args.num_iterations
@@ -345,6 +354,10 @@ elif args.target_flops > 0:
     # Calculate the number of iterations from the target flops (used in scaling laws analysis, e.g. runs/scaling_laws.sh)
     num_iterations = round(args.target_flops / (num_flops_per_token * total_batch_size))
     print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
+elif args.target_tokens > 0:
+    # Calculate the number of iterations from the target tokens
+    num_iterations = args.target_tokens // total_batch_size
+    print0(f"Calculated number of iterations from target tokens: {num_iterations:,}")
 elif args.target_param_data_ratio > 0:
     # Calculate the number of iterations from the target param data ratio (the most common use case)
     num_iterations = target_tokens // total_batch_size

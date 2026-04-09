@@ -3,14 +3,20 @@ defaults:
   - _self_
   - hydra: base
   - model: null   # override with e.g. model=tiny, model=small, model=base
+  - hydra/sweeper/params: null
+  - override hydra/launcher: tamia
 
 runtime:
   device_type: ""
 
 log:
-  run: dummy
-  save_every: -1
+  wandb_project: nanochat
+  wandb_entity: guillaume-lajoie
+  save_every: 100
+  num_checkpoints: -1
   model_tag: null
+  resume_run_id: null
+  sweep_id: null
 
 optim:
   device_batch_size: 32
@@ -27,19 +33,21 @@ optim:
 
 horizon:
   num_iterations: -1
-  target_flops: -1.0
-  target_param_data_ratio: 12.0
+  target_flops: -1
+  target_tokens: -1
+  target_param_data_ratio: 20
+  target_time_minutes: -1
 
 fp8:
   enabled: false
   recipe: tensorwise  # tensorwise | rowwise
 
 eval:
-  eval_every: 250
+  eval_every: -1
   eval_tokens: 41943040  # 80 * 524288
-  core_metric_every: 2000
+  core_metric_every: -1
   core_metric_max_per_task: 500
-  sample_every: 2000
+  sample_every: -1
 
 model:
   depth: 20

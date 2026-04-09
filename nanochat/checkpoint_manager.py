@@ -40,35 +40,37 @@ def _patch_missing_keys(model_data, model_config):
         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+    step_dir = os.path.join(checkpoint_dir, f"{step:06d}")
     if rank == 0:
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(step_dir, exist_ok=True)
         # Save the model state parameters
-        model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+        model_path = os.path.join(step_dir, "model.pt")
         torch.save(model_data, model_path)
         logger.info(f"Saved model parameters to: {model_path}")
         # Save the metadata dict as json
-        meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+        meta_path = os.path.join(step_dir, "meta.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        os.makedirs(step_dir, exist_ok=True)
+        optimizer_path = os.path.join(step_dir, f"optim_rank{rank:d}.pt")
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
+    step_dir = os.path.join(checkpoint_dir, f"{step:06d}")
     # Load the model state
-    model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
+    model_path = os.path.join(step_dir, "model.pt")
     model_data = torch.load(model_path, map_location=device)
     # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        optimizer_path = os.path.join(step_dir, f"optim_rank{rank:d}.pt")
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
-    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+    meta_path = os.path.join(step_dir, "meta.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_data = json.load(f)
     return model_data, optimizer_data, meta_data
@@ -136,12 +138,11 @@ def find_largest_model(checkpoints_dir):
 
 
 def find_last_step(checkpoint_dir):
-    # Look into checkpoint_dir and find model_<step>.pt with the highest step
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
-    if not checkpoint_files:
+    step_dirs = [d for d in os.listdir(checkpoint_dir)
+                 if os.path.isdir(os.path.join(checkpoint_dir, d)) and d.isdigit()]
+    if not step_dirs:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
-    return last_step
+    return max(int(d) for d in step_dirs)
 
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
@@ -185,7 +186,7 @@ def load_optimizer_state(source, device, rank, model_tag=None, step=None):
     checkpoint_dir = os.path.join(checkpoints_dir, model_tag)
     if step is None:
         step = find_last_step(checkpoint_dir)
-    optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+    optimizer_path = os.path.join(checkpoint_dir, f"{step:06d}", f"optim_rank{rank:d}.pt")
     if not os.path.exists(optimizer_path):
         log0(f"Optimizer checkpoint not found: {optimizer_path}")
         return None

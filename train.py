@@ -36,6 +36,16 @@ import hydra
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
+# Custom resolvers for per-job hyperparameter sampling in sweeps.
+# Usage in a sweeper params file:
+#   optim.embedding_lr: "${uniform:0.1,0.3}"
+#   optim.matrix_lr: "${loguniform:0.01,0.1}"
+# Each job is a separate process so each call returns an independent sample.
+import random as _random
+OmegaConf.register_new_resolver("uniform",    lambda lo, hi: _random.uniform(float(lo), float(hi)), replace=True)
+OmegaConf.register_new_resolver("loguniform", lambda lo, hi: math.exp(_random.uniform(math.log(float(lo)), math.log(float(hi)))), replace=True)
+OmegaConf.register_new_resolver("randint",    lambda lo, hi: _random.randint(int(lo), int(hi)), replace=True)
+
 
 @dataclass
 class ModelConfig:
@@ -48,10 +58,12 @@ class ModelConfig:
 
 @dataclass
 class HorizonConfig:
-    """Training horizon: only one of num_iterations / target_flops / target_param_data_ratio is used (in that order)."""
+    """Training horizon: only one of num_iterations / target_flops / target_tokens / target_param_data_ratio / target_time_minutes is used (in that order)."""
     num_iterations: int = -1
     target_flops: float = -1.0
+    target_tokens: int = -1
     target_param_data_ratio: float = 12.0
+    target_time_minutes: float = -1.0
 
 
 @dataclass
@@ -86,9 +98,14 @@ class EvalConfig:
 
 @dataclass
 class LogConfig:
-    run: str = "dummy"  # wandb run name; "dummy" disables wandb
-    save_every: int = -1  # -1 = only save at end
+    save_every: int = -1        # -1 = only save at end
+    num_checkpoints: int = -1  # -1 = disabled; N = save at N equal intervals including the last step
     model_tag: Optional[str] = None  # override checkpoint directory name
+    run: Optional[str] = None  # wandb run name; "dummy" disables wandb, "" enables with auto-generated name
+    resume_run_id: Optional[str] = None  # resume an existing wandb run by ID (also resumes its output directory)
+    wandb_project: str = "nanochat"  # wandb project name
+    wandb_entity: Optional[str] = None  # wandb entity/team name
+    sweep_id: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +134,27 @@ _register_configs()
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
+    # If resuming an existing run, load its saved config and apply CLI overrides on top.
+    resume_run_id = OmegaConf.select(cfg, "log.resume_run_id")
+    if resume_run_id:
+        from hydra.core.hydra_config import HydraConfig
+        run_output_dir = os.path.join("logs", "outputs", resume_run_id)
+        config_path = os.path.join(run_output_dir, "config.json")
+        if not os.path.isfile(config_path):
+            raise FileNotFoundError(f"No config.json found for resume_run_id={resume_run_id} at {config_path}")
+        with open(config_path) as f:
+            saved_config = json.load(f)
+        task_overrides = [o for o in HydraConfig.get().overrides.task if not o.startswith(("~", "+"))]
+        cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), OmegaConf.create(saved_config), OmegaConf.from_dotlist(task_overrides))
+
+        # Auto-detect last checkpoint step if resume_from_step not explicitly set
+        if OmegaConf.select(cfg, "optim.resume_from_step", default=-1) == -1:
+            step_dirs = [d for d in os.listdir(run_output_dir) if d.isdigit()]
+            if step_dirs:
+                last_step = max(int(d) for d in step_dirs)
+                OmegaConf.update(cfg, "optim.resume_from_step", last_step)
+                print(f"Auto-detected resume_from_step={last_step} for run {resume_run_id}")
+
     # Convert to structured config for type safety and attribute access
     c: TrainConfig = OmegaConf.to_object(cfg)  # type: ignore[assignment]
 
@@ -156,7 +194,33 @@ def main(cfg: DictConfig) -> None:
     print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
     use_dummy_wandb = c.log.run == "dummy" or not master_process
-    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=c.log.run, config=user_config)
+    if use_dummy_wandb:
+        wandb_run = DummyWandb()
+    elif c.log.resume_run_id is not None:
+        wandb_run = wandb.init(
+            id=c.log.resume_run_id,
+            resume="must",
+            project=c.log.wandb_project,
+            entity=c.log.wandb_entity,
+        )
+    else:
+        wandb_run = wandb.init(
+            project=c.log.wandb_project,
+            entity=c.log.wandb_entity,
+            name=c.log.run,
+            config=user_config,
+        )
+    
+    # Extract run ID for checkpoint directory naming, broadcast from rank 0 to all ranks
+    if master_process:
+        run_id = "DUMMY" if use_dummy_wandb else wandb_run.id
+    else:
+        run_id = None
+    if is_ddp_initialized():
+        run_id_list = [run_id]
+        dist.broadcast_object_list(run_id_list, src=0)
+        run_id = run_id_list[0]
+    print0(f"Run ID: {run_id}")
 
     from nanochat.flash_attention import USE_FA3
     using_fa3 = USE_FA3
@@ -205,9 +269,16 @@ def main(cfg: DictConfig) -> None:
     model.to_empty(device=device)
     model.init_weights()
 
-    base_dir = get_base_dir()
-    output_dirname = c.log.model_tag if c.log.model_tag else f"d{c.model.depth}"
-    checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+    # Save all run outputs in logs/outputs/run_id
+    # This includes checkpoints (model, metadata, optimizer state) and reports
+    run_output_dir = os.path.join("logs", "outputs", run_id)
+    checkpoint_dir = run_output_dir
+    if master_process:
+        os.makedirs(run_output_dir, exist_ok=True)
+        with open(os.path.join(run_output_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(user_config, f, indent=2)
+    print0(f"Run output directory: {run_output_dir}")
+    
     resuming = c.optim.resume_from_step != -1
     if resuming:
         print0(f"Resuming optimization from step {c.optim.resume_from_step}")
@@ -359,21 +430,33 @@ def main(cfg: DictConfig) -> None:
     # -------------------------------------------------------------------------
     # Training horizon
 
-    assert c.horizon.num_iterations > 0 or c.horizon.target_param_data_ratio > 0 or c.horizon.target_flops > 0
+    assert c.horizon.num_iterations > 0 or c.horizon.target_tokens > 0 or c.horizon.target_param_data_ratio > 0 or c.horizon.target_flops > 0 or c.horizon.target_time_minutes > 0
     if c.horizon.num_iterations > 0:
         num_iterations = c.horizon.num_iterations
         print0(f"Using user-provided number of iterations: {num_iterations:,}")
     elif c.horizon.target_flops > 0:
         num_iterations = round(c.horizon.target_flops / (num_flops_per_token * total_batch_size))
         print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
+    elif c.horizon.target_tokens > 0:
+        num_iterations = c.horizon.target_tokens // total_batch_size
+        print0(f"Calculated number of iterations from target tokens: {num_iterations:,}")
     elif c.horizon.target_param_data_ratio > 0:
         num_iterations = target_tokens // total_batch_size
         print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
+    elif c.horizon.target_time_minutes > 0:
+        num_iterations = 10_000_000  # placeholder; recomputed after warmup once throughput is known
+        print0(f"Target time: {c.horizon.target_time_minutes}min — num_iterations will be set after warmup")
     else:
         raise ValueError("No training horizon specified")
 
     total_tokens = total_batch_size * num_iterations
     print0(f"Total number of training tokens: {total_tokens:,}")
+
+    # Pre-compute checkpoint steps for num_checkpoints mode
+    checkpoint_steps = set()
+    if c.log.num_checkpoints > 0:
+        checkpoint_steps = {round(num_iterations * i / c.log.num_checkpoints) for i in range(1, c.log.num_checkpoints + 1)}
+        print0(f"Checkpoint steps (num_checkpoints={c.log.num_checkpoints}): {sorted(checkpoint_steps)}")
     print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}")
     print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
@@ -451,6 +534,7 @@ def main(cfg: DictConfig) -> None:
             wandb_run.log({
                 "step": step,
                 "total_training_flops": flops_so_far,
+                "total_tokens": total_batch_size * step,
                 "total_training_time": total_training_time,
                 "val/bpb": val_bpb,
             })
@@ -465,10 +549,17 @@ def main(cfg: DictConfig) -> None:
             wandb_run.log({
                 "step": step,
                 "total_training_flops": flops_so_far,
+                "total_tokens": total_batch_size * step,
                 "total_training_time": total_training_time,
                 "core_metric": results["core_metric"],
                 "centered_results": results["centered_results"],
             })
+            if master_process:
+                evals_dir = os.path.join(run_output_dir, "evals")
+                os.makedirs(evals_dir, exist_ok=True)
+                eval_path = os.path.join(evals_dir, f"step_{step:05d}.json")
+                with open(eval_path, "w", encoding="utf-8") as f:
+                    json.dump({"step": step, **results}, f, indent=2)
             model.train()
 
         if c.eval.sample_every > 0 and master_process and (last_step or (step > 0 and step % c.eval.sample_every == 0)):
@@ -490,7 +581,10 @@ def main(cfg: DictConfig) -> None:
                 print0(tokenizer.decode(sample[0]))
             model.train()
 
-        if last_step or (step > 0 and step != c.optim.resume_from_step and c.log.save_every > 0 and step % c.log.save_every == 0):
+        if last_step or (step > 0 and step != c.optim.resume_from_step and (
+            (c.log.save_every > 0 and step % c.log.save_every == 0) or
+            (step in checkpoint_steps)
+        )):
             save_checkpoint(
                 checkpoint_dir,
                 step,
@@ -498,6 +592,8 @@ def main(cfg: DictConfig) -> None:
                 optimizer.state_dict(),
                 {
                     "step": step,
+                    "total_flops": flops_so_far,
+                    "total_tokens": total_batch_size * step,
                     "val_bpb": val_bpb,
                     "model_config": model_config_kwargs,
                     "user_config": user_config,
@@ -565,6 +661,9 @@ def main(cfg: DictConfig) -> None:
         steps_done = step - 10
         if steps_done > 0:
             avg_time_per_step = total_training_time / steps_done
+            if c.horizon.target_time_minutes > 0 and steps_done == 20:
+                num_iterations = step + int(c.horizon.target_time_minutes * 60 / avg_time_per_step)
+                print0(f"Recomputed num_iterations={num_iterations:,} based on {c.horizon.target_time_minutes}min target ({avg_time_per_step*1000:.1f}ms/step)")
             remaining_steps = num_iterations - step
             eta_seconds = remaining_steps * avg_time_per_step
             eta_str = f" | eta: {eta_seconds/60:.1f}m"
@@ -576,6 +675,7 @@ def main(cfg: DictConfig) -> None:
             wandb_run.log({
                 "step": step,
                 "total_training_flops": flops_so_far,
+                "total_tokens": total_batch_size * step,
                 "total_training_time": total_training_time,
                 "train/loss": debiased_smooth_loss,
                 "train/lrm": lrm,
@@ -598,13 +698,16 @@ def main(cfg: DictConfig) -> None:
     # -------------------------------------------------------------------------
     # End of training
 
+    if is_ddp_initialized():
+        dist.barrier()  # ensure all ranks finish before any rank starts teardown
+
     print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
     print0(f"Total training time: {total_training_time/60:.2f}m")
     if val_bpb is not None:
         print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
     from nanochat.report import get_report
-    get_report().log(section="Base model training", data=[
+    get_report(report_dir=run_output_dir).log(section="Base model training", data=[
         user_config,
         {
             "Number of parameters": num_params,

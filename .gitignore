@@ -9,3 +9,4 @@ eval_bundle/
 CLAUDE.md
 wandb/
 cache/
+logs/

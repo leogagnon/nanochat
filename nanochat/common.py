@@ -5,6 +5,7 @@ Common utilities for nanochat.
 import os
 import re
 import logging
+import subprocess
 import urllib.request
 import torch
 import torch.distributed as dist
@@ -117,7 +118,7 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 def print0(s="",**kwargs):
     ddp_rank = int(os.environ.get('RANK', 0))
     if ddp_rank == 0:
-        print(s, **kwargs)
+        print(s, flush=True, **kwargs)
 
 def print_banner():
     # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
@@ -170,9 +171,31 @@ def autodetect_device_type():
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
+def _setup_slurm_env():
+    """Map SLURM env vars to the torchrun-compatible vars PyTorch DDP expects.
+    No-op if not in a SLURM job or if already launched via torchrun."""
+    if 'SLURM_JOB_ID' not in os.environ or 'RANK' in os.environ:
+        return
+    os.environ['RANK'] = os.environ['SLURM_PROCID']
+    os.environ['LOCAL_RANK'] = os.environ['SLURM_LOCALID']
+    os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS']
+    if 'MASTER_ADDR' not in os.environ:
+        if int(os.environ.get('SLURM_NNODES', 1)) == 1:
+            os.environ['MASTER_ADDR'] = 'localhost'
+        else:
+            first_node = subprocess.run(
+                ['scontrol', 'show', 'hostnames', os.environ['SLURM_NODELIST']],
+                capture_output=True, text=True,
+            ).stdout.split('\n')[0].strip()
+            os.environ['MASTER_ADDR'] = first_node
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = str(29500 + int(os.environ['SLURM_JOB_ID']) % 1000)
+
+
 def compute_init(device_type="cuda"): # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
+    _setup_slurm_env()
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
     if device_type == "cuda":
         assert torch.cuda.is_available(), "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
@@ -215,7 +238,7 @@ def compute_cleanup():
 class DummyWandb:
     """Useful if we wish to not use wandb but have all the same signatures"""
     def __init__(self):
-        pass
+        self.id = None  # No ID for dummy wandb
     def log(self, *args, **kwargs):
         pass
     def finish(self):
