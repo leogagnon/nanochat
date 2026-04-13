@@ -42,7 +42,12 @@ _register_configs()
 
 
 def _push_to_wandb(run_output_dir, run_id, step, eval_data, meta):
-    """Push eval results from a JSON dict to the pre-training wandb run."""
+    """Push eval results from a JSON dict to the pre-training wandb run.
+
+    Uses a per-run file lock so that concurrent eval jobs for the same run
+    serialize their wandb init/log/finish calls rather than overlapping.
+    """
+    import fcntl
     import wandb
     config_path = os.path.join(run_output_dir, "config.json")
     if not os.path.isfile(config_path):
@@ -54,27 +59,36 @@ def _push_to_wandb(run_output_dir, run_id, step, eval_data, meta):
     wandb_project = log_cfg.get("wandb_project", "nanochat")
     wandb_entity = log_cfg.get("wandb_entity", None)
 
-    wandb_run = wandb.init(
-        id=run_id,
-        resume="must",
-        project=wandb_project,
-        entity=wandb_entity,
-    )
-    wandb_run.define_metric("eval/*", step_metric="step")
-    log_data = {
-        "step": step,
-        "total_flops": meta.get("total_flops"),
-        "total_tokens": meta.get("total_tokens"),
-        "eval/core_metric": eval_data["core_metric"],
-        "eval/bpb_val": eval_data["bpb"]["val"],
-        "eval/bpb_train": eval_data["bpb"]["train"],
-    }
-    for task, score in eval_data["results"].items():
-        log_data[f"eval/results/{task}"] = score
-    for task, score in eval_data["centered_results"].items():
-        log_data[f"eval/centered_results/{task}"] = score
-    wandb_run.log(log_data)
-    wandb_run.finish()
+    evals_dir = os.path.join(run_output_dir, "full_evals")
+    os.makedirs(evals_dir, exist_ok=True)
+    lock_path = os.path.join(evals_dir, "wandb.lock")
+
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            wandb_run = wandb.init(
+                id=run_id,
+                resume="must",
+                project=wandb_project,
+                entity=wandb_entity,
+            )
+            wandb_run.define_metric("eval/*", step_metric="step")
+            log_data = {
+                "step": step,
+                "total_flops": meta.get("total_flops"),
+                "total_tokens": meta.get("total_tokens"),
+                "eval/core_metric": eval_data["core_metric"],
+                "eval/bpb_val": eval_data["bpb"]["val"],
+                "eval/bpb_train": eval_data["bpb"]["train"],
+            }
+            for task, score in eval_data["results"].items():
+                log_data[f"eval/results/{task}"] = score
+            for task, score in eval_data["centered_results"].items():
+                log_data[f"eval/centered_results/{task}"] = score
+            wandb_run.log(log_data)
+            wandb_run.finish()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
     return True
 
 
@@ -115,9 +129,12 @@ def main(cfg: DictConfig) -> None:
         meta_path = os.path.join(checkpoint_dir, "meta.json")
         meta = json.load(open(meta_path)) if os.path.isfile(meta_path) else {}
         try:
-            _push_to_wandb(run_output_dir, run_id, step, eval_data, meta)
-            open(wandb_marker, "w").close()
-            print(f"Wandb push done for {c.ckpt}")
+            pushed = _push_to_wandb(run_output_dir, run_id, step, eval_data, meta)
+            if pushed:
+                open(wandb_marker, "w").close()
+                print(f"Wandb push done for {c.ckpt}")
+            else:
+                print(f"Wandb push skipped for {c.ckpt} (no config.json)")
         except Exception as e:
             print(f"Wandb push failed for {c.ckpt}: {e}")
         return
@@ -222,9 +239,12 @@ def main(cfg: DictConfig) -> None:
         print0(f"\nResults written to: {eval_path}")
 
         try:
-            _push_to_wandb(run_output_dir, run_id, step, eval_data, meta)
-            open(wandb_marker, "w").close()
-            print0(f"Eval results logged to wandb run {run_id}")
+            pushed = _push_to_wandb(run_output_dir, run_id, step, eval_data, meta)
+            if pushed:
+                open(wandb_marker, "w").close()
+                print0(f"Eval results logged to wandb run {run_id}")
+            else:
+                print0(f"Wandb push skipped for {c.ckpt} (no config.json)")
         except Exception as e:
             print0(f"Wandb push failed for {c.ckpt}: {e}")
 

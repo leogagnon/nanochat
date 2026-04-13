@@ -134,26 +134,28 @@ _register_configs()
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    # If resuming an existing run, load its saved config and apply CLI overrides on top.
+    # If resuming an existing run, replace cfg with the saved config.
+    # Only resume_run_id and optim.resume_from_step are taken from the current invocation.
     resume_run_id = OmegaConf.select(cfg, "log.resume_run_id")
     if resume_run_id:
-        from hydra.core.hydra_config import HydraConfig
         run_output_dir = os.path.join("logs", "outputs", resume_run_id)
         config_path = os.path.join(run_output_dir, "config.json")
         if not os.path.isfile(config_path):
             raise FileNotFoundError(f"No config.json found for resume_run_id={resume_run_id} at {config_path}")
         with open(config_path) as f:
             saved_config = json.load(f)
-        task_overrides = [o for o in HydraConfig.get().overrides.task if not o.startswith(("~", "+"))]
-        cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), OmegaConf.create(saved_config), OmegaConf.from_dotlist(task_overrides))
+        resume_from_step = OmegaConf.select(cfg, "optim.resume_from_step", default=-1)
+        # Merge saved config on top of the already-structured cfg (saved values override train.yaml defaults)
+        cfg = OmegaConf.merge(cfg, OmegaConf.create(saved_config))
+        OmegaConf.update(cfg, "log.resume_run_id", resume_run_id)
 
-        # Auto-detect last checkpoint step if resume_from_step not explicitly set
-        if OmegaConf.select(cfg, "optim.resume_from_step", default=-1) == -1:
+        # Auto-detect last checkpoint step if resume_from_step not explicitly provided
+        if resume_from_step == -1:
             step_dirs = [d for d in os.listdir(run_output_dir) if d.isdigit()]
             if step_dirs:
-                last_step = max(int(d) for d in step_dirs)
-                OmegaConf.update(cfg, "optim.resume_from_step", last_step)
-                print(f"Auto-detected resume_from_step={last_step} for run {resume_run_id}")
+                resume_from_step = max(int(d) for d in step_dirs)
+                print(f"Auto-detected resume_from_step={resume_from_step} for run {resume_run_id}")
+        OmegaConf.update(cfg, "optim.resume_from_step", resume_from_step)
 
     # Convert to structured config for type safety and attribute access
     c: TrainConfig = OmegaConf.to_object(cfg)  # type: ignore[assignment]
@@ -460,6 +462,25 @@ def main(cfg: DictConfig) -> None:
     print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}")
     print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
+    # Log computed (non-config) values to wandb config and config.json
+    computed_summary = {
+        "num_params": num_params,
+        "flops_per_token": num_flops_per_token,
+        "num_iterations": num_iterations,
+        "total_tokens": total_tokens,
+        "total_batch_size": total_batch_size,
+        "ddp_world_size": ddp_world_size,
+        "tokens_per_scaling_param": total_batch_size * num_iterations / num_scaling_params,
+    }
+    if master_process:
+        wandb_run.config.update({"computed": computed_summary})
+        config_path = os.path.join(run_output_dir, "config.json")
+        with open(config_path) as f:
+            stored_config = json.load(f)
+        stored_config["computed"] = computed_summary
+        with open(config_path, "w") as f:
+            json.dump(stored_config, f, indent=2)
+
     # -------------------------------------------------------------------------
     # Schedulers
 
@@ -581,10 +602,11 @@ def main(cfg: DictConfig) -> None:
                 print0(tokenizer.decode(sample[0]))
             model.train()
 
-        if last_step or (step > 0 and step != c.optim.resume_from_step and (
+        is_checkpoint_step = last_step or (step > 0 and step != c.optim.resume_from_step and (
             (c.log.save_every > 0 and step % c.log.save_every == 0) or
             (step in checkpoint_steps)
-        )):
+        ))
+        if is_checkpoint_step:
             save_checkpoint(
                 checkpoint_dir,
                 step,
@@ -611,6 +633,19 @@ def main(cfg: DictConfig) -> None:
             )
 
         if last_step:
+            if step > 0:  # at least one training step happened
+                wandb_run.log({
+                    "step": step,
+                    "total_training_flops": flops_so_far,
+                    "total_tokens": total_batch_size * step,
+                    "total_training_time": total_training_time,
+                    "train/loss": debiased_smooth_loss,
+                    "train/lrm": lrm,
+                    "train/dt": dt,
+                    "train/tok_per_sec": tok_per_sec,
+                    "train/mfu": mfu,
+                    "train/epoch": epoch,
+                })
             break
 
         synchronize()
@@ -671,7 +706,7 @@ def main(cfg: DictConfig) -> None:
             eta_str = ""
         epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
         print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
-        if step % 100 == 0:
+        if step % 100 == 0 or is_checkpoint_step:
             wandb_run.log({
                 "step": step,
                 "total_training_flops": flops_so_far,
@@ -730,6 +765,25 @@ def main(cfg: DictConfig) -> None:
             "Peak memory usage": f"{get_max_memory() / 1024 / 1024:.2f}MiB",
         },
     ])
+
+    # Update config.json and wandb summary with end-of-training results
+    if master_process:
+        results_summary = {
+            "min_val_bpb": min_val_bpb if val_bpb is not None else None,
+            "final_val_bpb": val_bpb,
+            "core_metric": results.get("core_metric", None),
+            "mfu_pct": mfu,
+            "total_flops": flops_so_far,
+            "total_training_time_min": total_training_time / 60,
+            "peak_memory_mib": get_max_memory() / 1024 / 1024,
+        }
+        config_path = os.path.join(run_output_dir, "config.json")
+        with open(config_path) as f:
+            stored_config = json.load(f)
+        stored_config.setdefault("computed", {}).update(results_summary)
+        with open(config_path, "w") as f:
+            json.dump(stored_config, f, indent=2)
+        wandb_run.summary.update(results_summary)
 
     wandb_run.finish()
     compute_cleanup()
