@@ -1,0 +1,15 @@
+# @package _global_
+model:
+  depth: 22
+
+log:
+  model_tag: tabpfn_2
+
+optim:
+  embedding_lr: 0.7034403232618286
+  final_lr_frac: 0.05718939513877618
+  matrix_lr: 0.02702595279367986
+  scalar_lr: 0.4676528214785884
+  unembedding_lr: 0.00452765660323333
+  warmdown_ratio: 0.8412050004923929
+  weight_decay: 0.09841972208699806

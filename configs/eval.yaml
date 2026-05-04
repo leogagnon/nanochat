@@ -9,5 +9,5 @@ ckpt: ???
 ckpt_root: /home/l/leog/links/scratch/nanochat/logs/outputs
 max_per_task: -1
 eval_tokens: 41943040  # 80 * 524288
-device_batch_size: 32
+device_batch_size: 16
 device_type: ""

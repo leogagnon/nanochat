@@ -1,0 +1,18 @@
+horizon.target_param_data_ratio: -1
+horizon.target_flops: 2.15e19
+model.depth: 22
+optim.device_batch_size: 16
+
+eval.core_metric_every: -1
+eval.core_metric_max_per_task: -1
+eval.sample_every: -1
+
+# 1 checkpoints every run
+log.save_every: -1
+log.num_checkpoints: 1
+log.output_dir: /home/l/leog/links/projects/aip-glaj/leog/nanochat_outputs
+
+pred: gp_0, gp_1, gp_2, linear_0, linear_1, linear_2, random_0, random_1, random_2, random_forest_0, random_forest_1, random_forest_2, tabpfn_0, tabpfn_1, tabpfn_2
+
+log.sweep_id: pred_good
+log.wandb_project: nanochat

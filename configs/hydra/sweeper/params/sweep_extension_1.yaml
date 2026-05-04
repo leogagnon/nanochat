@@ -1,6 +1,7 @@
 horizon.target_param_data_ratio: -1
 horizon.target_flops: 1e18, 2.15e18, 4.64e18, 1e19
-model.depth: 10, 12, 14, 16, 18, 20
+model.depth: 22
+optim.device_batch_size: 16
 
 eval.core_metric_every: -1
 eval.core_metric_max_per_task: -1
@@ -19,4 +20,4 @@ optim.warmdown_ratio: '${uniform:0.2,0.85}'
 optim.final_lr_frac: '${uniform:0.005,0.15}'
 
 log.sweep_id: sweep_5
-log.wandb_project: nanochat, nanochat # dummy sweep to get two runs 
+log.wandb_project: nanochat, nanochat # dummy sweep to get multiple runs

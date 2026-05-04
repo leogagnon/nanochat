@@ -30,21 +30,18 @@ from dataclasses import asdict
 from contextlib import contextmanager
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import hydra
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
-# Custom resolvers for per-job hyperparameter sampling in sweeps.
-# Usage in a sweeper params file:
-#   optim.embedding_lr: "${uniform:0.1,0.3}"
-#   optim.matrix_lr: "${loguniform:0.01,0.1}"
-# Each job is a separate process so each call returns an independent sample.
-import random as _random
-OmegaConf.register_new_resolver("uniform",    lambda lo, hi: _random.uniform(float(lo), float(hi)), replace=True)
-OmegaConf.register_new_resolver("loguniform", lambda lo, hi: math.exp(_random.uniform(math.log(float(lo)), math.log(float(hi)))), replace=True)
-OmegaConf.register_new_resolver("randint",    lambda lo, hi: _random.randint(int(lo), int(hi)), replace=True)
+import hydra_plugins.lazy_sweeper  # registers hydra/sweeper=lazy_basic
+
+OmegaConf.register_new_resolver("uniform", lambda lo, hi: __import__("random").uniform(float(lo), float(hi)))
+OmegaConf.register_new_resolver("randint", lambda lo, hi: __import__("random").randint(int(lo), int(hi)))
+
+
 
 
 @dataclass
@@ -106,7 +103,7 @@ class LogConfig:
     wandb_project: str = "nanochat"  # wandb project name
     wandb_entity: Optional[str] = None  # wandb entity/team name
     sweep_id: Optional[str] = None
-
+    output_dir: str = "logs/outputs"  # base directory for run outputs and checkpoints
 
 @dataclass
 class RuntimeConfig:
@@ -138,12 +135,13 @@ def main(cfg: DictConfig) -> None:
     # Only resume_run_id and optim.resume_from_step are taken from the current invocation.
     resume_run_id = OmegaConf.select(cfg, "log.resume_run_id")
     if resume_run_id:
-        run_output_dir = os.path.join("logs", "outputs", resume_run_id)
+        run_output_dir = os.path.join(OmegaConf.select(cfg, "log.output_dir", default="logs/outputs"), resume_run_id)
         config_path = os.path.join(run_output_dir, "config.json")
         if not os.path.isfile(config_path):
             raise FileNotFoundError(f"No config.json found for resume_run_id={resume_run_id} at {config_path}")
         with open(config_path) as f:
             saved_config = json.load(f)
+        saved_config.pop("computed", None)
         resume_from_step = OmegaConf.select(cfg, "optim.resume_from_step", default=-1)
         # Merge saved config on top of the already-structured cfg (saved values override train.yaml defaults)
         cfg = OmegaConf.merge(cfg, OmegaConf.create(saved_config))
@@ -271,9 +269,7 @@ def main(cfg: DictConfig) -> None:
     model.to_empty(device=device)
     model.init_weights()
 
-    # Save all run outputs in logs/outputs/run_id
-    # This includes checkpoints (model, metadata, optimizer state) and reports
-    run_output_dir = os.path.join("logs", "outputs", run_id)
+    run_output_dir = os.path.join(c.log.output_dir, run_id)
     checkpoint_dir = run_output_dir
     if master_process:
         os.makedirs(run_output_dir, exist_ok=True)
@@ -473,7 +469,7 @@ def main(cfg: DictConfig) -> None:
         "tokens_per_scaling_param": total_batch_size * num_iterations / num_scaling_params,
     }
     if master_process:
-        wandb_run.config.update({"computed": computed_summary})
+        wandb_run.config.update({"computed": computed_summary}, allow_val_change=True)
         config_path = os.path.join(run_output_dir, "config.json")
         with open(config_path) as f:
             stored_config = json.load(f)

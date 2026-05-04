@@ -1,0 +1,15 @@
+# @package _global_
+model:
+  depth: 22
+
+log:
+  model_tag: linear_2
+
+optim:
+  embedding_lr: 0.782740384869458
+  final_lr_frac: 0.03445033349080751
+  matrix_lr: 0.010751484041551972
+  scalar_lr: 0.22782387070479698
+  unembedding_lr: 0.01199581726005679
+  warmdown_ratio: 0.6728015016938128
+  weight_decay: 0.055438984965621094

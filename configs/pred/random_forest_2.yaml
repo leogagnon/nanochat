@@ -1,0 +1,15 @@
+# @package _global_
+model:
+  depth: 22
+
+log:
+  model_tag: random_forest_2
+
+optim:
+  embedding_lr: 0.6227878558385733
+  final_lr_frac: 0.05645201057167536
+  matrix_lr: 0.026070743617093425
+  scalar_lr: 0.7356331466094231
+  unembedding_lr: 0.017413648150798697
+  warmdown_ratio: 0.7705773148375611
+  weight_decay: 0.06803609724758591

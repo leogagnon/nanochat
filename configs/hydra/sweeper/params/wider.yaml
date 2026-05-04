@@ -1,0 +1,22 @@
+horizon.target_param_data_ratio: -1
+horizon.target_flops: 1e19
+model.depth: 10, 12, 14
+
+eval.core_metric_every: -1
+eval.core_metric_max_per_task: -1
+eval.sample_every: -1
+
+# 4 checkpoints every run
+log.save_every: -1
+log.num_checkpoints: 4
+
+optim.embedding_lr: '${uniform:0.1,1.0}'
+optim.unembedding_lr: '${uniform:0.1,1.0}'
+optim.weight_decay: '${uniform:0.1,1.0}'
+optim.matrix_lr: '${uniform:0.1,1.0}'
+optim.scalar_lr: '${uniform:0.1,1.0}'
+optim.warmdown_ratio: '${uniform:0.1,1.0}'
+optim.final_lr_frac: '${uniform:0.1,1.0}'
+
+log.sweep_id: wider_sweep_0
+log.wandb_project: nanochat, nanochat, nanochat, nanochat # dummy sweep to get two runs 

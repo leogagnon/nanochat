@@ -3,7 +3,9 @@ defaults:
   - _self_
   - hydra: base
   - model: null   # override with e.g. model=tiny, model=small, model=base
+  - pred: null
   - hydra/sweeper/params: null
+  - override hydra/sweeper: lazy_basic
   - override hydra/launcher: tamia
 
 runtime:
@@ -17,6 +19,7 @@ log:
   model_tag: null
   resume_run_id: null
   sweep_id: null
+  output_dir: logs/outputs
 
 optim:
   device_batch_size: 32

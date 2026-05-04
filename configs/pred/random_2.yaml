@@ -1,0 +1,15 @@
+# @package _global_
+model:
+  depth: 22
+
+log:
+  model_tag: random_2
+
+optim:
+  embedding_lr: 0.8833337103300495
+  final_lr_frac: 0.09955484913993053
+  matrix_lr: 0.02250776792942984
+  scalar_lr: 0.16310129792745395
+  unembedding_lr: 0.03146918951134823
+  warmdown_ratio: 0.4637569280575444
+  weight_decay: 0.4354341791825325
